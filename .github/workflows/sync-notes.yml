@@ -79,6 +79,45 @@ jobs:
         fi
 
         echo "所有必要的环境变量验证通过 ✅"
+        
+# ===== 新增步骤：获取当前运行的出口IP =====
+    - name: 获取当前出口IP
+      id: get_ip
+      run: |
+        PUBLIC_IP=$(curl -s http://icanhazip.com | xargs)
+        echo "ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+        echo "当前运行环境出口IP: $PUBLIC_IP"
+
+    # ===== 新增步骤：将IP添加到飞书白名单 =====
+    - name: 添加IP到飞书应用白名单
+      run: |
+        # 1. 获取 tenant_access_token
+        TOKEN_RESPONSE=$(curl -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+          -H "Content-Type: application/json" \
+          -d '{"app_id":"${{ secrets.FEISHU_APP_ID }}","app_secret":"${{ secrets.FEISHU_APP_SECRET }}"}')
+        TENANT_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.tenant_access_token')
+
+        if [ "$TENANT_TOKEN" = "null" ]; then
+          echo "❌ 获取飞书 tenant_access_token 失败"
+          exit 1
+        fi
+
+        # 2. 调用飞书 API 更新白名单
+        UPDATE_RESPONSE=$(curl -X PUT "https://open.feishu.cn/open-apis/application/v6/app/ip_whitelist" \
+          -H "Authorization: Bearer $TENANT_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "app_id": "${{ secrets.FEISHU_APP_ID }}",
+            "ip_whitelist": ["${{ steps.get_ip.outputs.ip }}/32"]
+          }')
+
+        if echo "$UPDATE_RESPONSE" | grep -q '"code":0'; then
+          echo "✅ 成功将IP ${{ steps.get_ip.outputs.ip }} 添加到飞书白名单"
+        else
+          echo "❌ 添加白名单失败: $UPDATE_RESPONSE"
+          exit 1
+        fi
+
     
     - name: 执行笔记同步
       env:
@@ -139,6 +178,21 @@ jobs:
               \"text\": \"${STATUS_EMOJI} GET笔记自动同步${STATUS_TEXT}\\n\\n执行时间: ${CURRENT_TIME}\\n仓库: ${{ github.repository }}\\n分支: ${{ github.ref_name }}\"
             }
           }"
+
+         # ===== 可选：运行结束后清空白名单（提升安全） =====
+    - name: 清空飞书应用白名单
+      if: always()
+      run: |
+        TOKEN_RESPONSE=$(curl -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+          -H "Content-Type: application/json" \
+          -d '{"app_id":"${{ secrets.FEISHU_APP_ID }}","app_secret":"${{ secrets.FEISHU_APP_SECRET }}"}')
+        TENANT_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.tenant_access_token')
+
+        curl -X PUT "https://open.feishu.cn/open-apis/application/v6/app/ip_whitelist" \
+          -H "Authorization: Bearer $TENANT_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"app_id": "${{ secrets.FEISHU_APP_ID }}", "ip_whitelist": []}'
+        echo "已清空白名单"
 
   # 可选：定期清理工作流运行历史
   cleanup:
